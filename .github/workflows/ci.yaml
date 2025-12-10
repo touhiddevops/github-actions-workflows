@@ -1,0 +1,104 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    name: Test and Lint
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Run ESLint
+        run: npm run lint
+        
+      - name: Run TypeScript check
+        run: npx tsc --noEmit
+        
+      - name: Build application
+        run: npm run build
+        
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-files
+          path: .next/
+          retention-days: 1
+
+  sync-dev-server:
+    name: Sync dev_server branch with main
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - name: Checkout main branch
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Check if dev_server branch exists
+        id: check-branch
+        run: |
+          if git ls-remote --heads origin dev_server | grep -q dev_server; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check if develop branch exists (for migration)
+        id: check-develop
+        run: |
+          if git ls-remote --heads origin develop | grep -q develop; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Migrate develop to dev_server if needed
+        if: steps.check-develop.outputs.exists == 'true' && steps.check-branch.outputs.exists == 'false'
+        run: |
+          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+          git fetch origin develop
+          git checkout develop
+          git checkout -b dev_server
+          git push origin dev_server
+
+      - name: Create or checkout dev_server branch
+        if: steps.check-develop.outputs.exists == 'false'
+        run: |
+          if [ "${{ steps.check-branch.outputs.exists }}" == "true" ]; then
+            git fetch origin dev_server
+            git checkout dev_server
+            git reset --hard origin/main
+          else
+            git checkout -b dev_server
+          fi
+
+      - name: Push dev_server branch
+        run: |
+          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+          git push origin dev_server --force
